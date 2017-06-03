@@ -1,0 +1,1142 @@
+#! /usr/bin/perl -w
+# nagios: -epn
+
+my %ERRORS=( OK => 0, WARNING => 1, CRITICAL => 2, UNKNOWN => 3 );
+my %ERRORCODES=( 0 => 'OK', 1 => 'WARNING', 2 => 'CRITICAL', 3 => 'UNKNOWN' );
+package DBD::MySQL::Server::Instance::Innodb;
+
+use strict;
+
+our @ISA = qw(DBD::MySQL::Server::Instance);
+
+
+sub new {
+  my $class = shift;
+  my %params = @_;
+  my $self = {
+    handle => $params{handle},
+    internals => undef,
+    warningrange => $params{warningrange},
+    criticalrange => $params{criticalrange},
+  };
+  bless $self, $class;
+  $self->init(%params);
+  return $self;
+}
+
+sub init {
+  my $self = shift;
+  my %params = @_;
+  $self->init_nagios();
+  if ($params{mode} =~ /server::instance::innodb/) {
+    $self->{internals} =
+        DBD::MySQL::Server::Instance::Innodb::Internals->new(%params);
+  }
+}
+
+sub nagios {
+  my $self = shift;
+  my %params = @_;
+  if ($params{mode} =~ /server::instance::innodb/) {
+    $self->{internals}->nagios(%params);
+    $self->merge_nagios($self->{internals});
+  }
+}
+package DBD::MySQL::Server::Instance::MyISAM::Internals;
+
+use strict;
+
+our @ISA = qw(DBD::MySQL::Server::Instance::MyISAM);
+
+our $internals; # singleton, nur ein einziges mal instantiierbar
+
+sub new {
+  my $class = shift;
+  my %params = @_;
+  unless ($internals) {
+    $internals = {
+      handle => $params{handle},
+      keycache_hitrate => undef,
+      warningrange => $params{warningrange},
+      criticalrange => $params{criticalrange},
+    };
+    bless($internals, $class);
+    $internals->init(%params);
+  }
+  return($internals);
+}
+
+sub init {
+  my $self = shift;
+  my %params = @_;
+  my $dummy;
+  $self->debug("enter init");
+  $self->init_nagios();
+  if ($params{mode} =~ /server::instance::myisam::keycache::hitrate/) {
+    ($dummy, $self->{key_reads})
+        = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Key_reads'
+    });
+    ($dummy, $self->{key_read_requests})
+        = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Key_read_requests'
+    });
+    if (! defined $self->{key_read_requests}) {
+      $self->add_nagios_critical("no myisam keycache info available");
+    } else {
+      $self->valdiff(\%params, qw(key_reads key_read_requests));
+      $self->{keycache_hitrate} =
+          $self->{key_read_requests} > 0 ?
+          100 - (100 * $self->{key_reads} /
+              $self->{key_read_requests}) : 100;
+      $self->{keycache_hitrate_now} =
+          $self->{delta_key_read_requests} > 0 ?
+          100 - (100 * $self->{delta_key_reads} /
+              $self->{delta_key_read_requests}) : 100;
+    }
+  } elsif ($params{mode} =~ /server::instance::myisam::sonstnochwas/) {
+  }
+}
+
+sub nagios {
+  my $self = shift;
+  my %params = @_;
+  if (! $self->{nagios_level}) {
+    if ($params{mode} =~ /server::instance::myisam::keycache::hitrate/) {
+      my $refkey = 'keycache_hitrate'.($params{lookback} ? '_now' : '');
+      $self->add_nagios(
+          $self->check_thresholds($self->{$refkey}, "99:", "95:"),
+              sprintf "myisam keycache hitrate at %.2f%%", $self->{$refkey});
+      $self->add_perfdata(sprintf "keycache_hitrate=%.2f%%;%s;%s",
+          $self->{keycache_hitrate},
+          $self->{warningrange}, $self->{criticalrange});
+      $self->add_perfdata(sprintf "keycache_hitrate_now=%.2f%%;%s;%s",
+          $self->{keycache_hitrate_now},
+          $self->{warningrange}, $self->{criticalrange});
+    }
+  }
+}
+
+
+package DBD::MySQL::Server::Instance::Replication;
+
+use strict;
+
+our @ISA = qw(DBD::MySQL::Server::Instance);
+
+
+sub new {
+  my $class = shift;
+  my %params = @_;
+  my $self = {
+    handle => $params{handle},
+    internals => undef,
+    warningrange => $params{warningrange},
+    criticalrange => $params{criticalrange},
+  };
+  bless $self, $class;
+  $self->init(%params);
+  return $self;
+}
+
+sub init {
+  my $self = shift;
+  my %params = @_;
+  $self->init_nagios();
+  if ($params{mode} =~ /server::instance::replication/) {
+    $self->{internals} =
+        DBD::MySQL::Server::Instance::Replication::Internals->new(%params);
+  }
+}
+
+sub nagios {
+  my $self = shift;
+  my %params = @_;
+  if ($params{mode} =~ /server::instance::replication/) {
+    $self->{internals}->nagios(%params);
+    $self->merge_nagios($self->{internals});
+  }
+}
+
+
+package DBD::MySQL::Server::Instance::Replication::Internals;
+
+use strict;
+
+our @ISA = qw(DBD::MySQL::Server::Instance::Replication);
+
+our $internals; # singleton, nur ein einziges mal instantiierbar
+
+sub new {
+  my $class = shift;
+  my %params = @_;
+  unless ($internals) {
+    $internals = {
+      handle => $params{handle},
+      seconds_behind_master => undef,
+      slave_io_running => undef,
+      slave_sql_running => undef,
+      warningrange => $params{warningrange},
+      criticalrange => $params{criticalrange},
+    };
+    bless($internals, $class);
+    $internals->init(%params);
+  }
+  return($internals);
+}
+
+sub init {
+  my $self = shift;
+  my %params = @_;
+  $self->debug("enter init");
+  $self->init_nagios();
+  if ($params{mode} =~ /server::instance::replication::slavelag/) {
+    # "show slave status", "Seconds_Behind_Master"
+    my $slavehash = $self->{handle}->selectrow_hashref(q{
+            SHOW SLAVE STATUS
+        });
+    if ((! defined $slavehash->{Seconds_Behind_Master}) &&
+        (lc $slavehash->{Slave_IO_Running} eq 'no')) {
+      $self->add_nagios_critical(
+          "unable to get slave lag, because io thread is not running");
+    } elsif (! defined $slavehash->{Seconds_Behind_Master}) {
+      $self->add_nagios_critical(sprintf "unable to get replication info%s",
+          $self->{handle}->{errstr} ? $self->{handle}->{errstr} : "");
+    } else {
+      $self->{seconds_behind_master} = $slavehash->{Seconds_Behind_Master};
+    }
+  } elsif ($params{mode} =~ /server::instance::replication::slaveiorunning/) {
+    # "show slave status", "Slave_IO_Running"
+    my $slavehash = $self->{handle}->selectrow_hashref(q{
+            SHOW SLAVE STATUS
+        });
+    if (! defined $slavehash->{Slave_IO_Running}) {
+      $self->add_nagios_critical(sprintf "unable to get replication info%s",
+          $self->{handle}->{errstr} ? $self->{handle}->{errstr} : "");
+    } else {
+      $self->{slave_io_running} = $slavehash->{Slave_IO_Running};
+    }
+  } elsif ($params{mode} =~ /server::instance::replication::slavesqlrunning/) {
+    # "show slave status", "Slave_SQL_Running"
+    my $slavehash = $self->{handle}->selectrow_hashref(q{
+            SHOW SLAVE STATUS
+        });
+    if (! defined $slavehash->{Slave_SQL_Running}) {
+      $self->add_nagios_critical(sprintf "unable to get replication info%s",
+          $self->{handle}->{errstr} ? $self->{handle}->{errstr} : "");
+    } else {
+      $self->{slave_sql_running} = $slavehash->{Slave_SQL_Running};
+    }
+  }
+}
+
+sub nagios {
+  my $self = shift;
+  my %params = @_;
+  if (! $self->{nagios_level}) {
+    if ($params{mode} =~ /server::instance::replication::slavelag/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{seconds_behind_master}, "10", "20"),
+          sprintf "Slave is %d seconds behind master",
+          $self->{seconds_behind_master});
+      $self->add_perfdata(sprintf "slave_lag=%d;%s;%s",
+          $self->{seconds_behind_master},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::replication::slaveiorunning/) {
+      if (lc $self->{slave_io_running} eq "yes") {
+        $self->add_nagios_ok("Slave io is running");
+      } else {
+        $self->add_nagios_critical("Slave io is not running");
+      }
+    } elsif ($params{mode} =~ /server::instance::replication::slavesqlrunning/) {
+      if (lc $self->{slave_sql_running} eq "yes") {
+        $self->add_nagios_ok("Slave sql is running");
+      } else {
+        $self->add_nagios_critical("Slave sql is not running");
+      }
+    }
+  }
+}
+
+
+
+package DBD::MySQL::Server::Instance;
+
+use strict;
+
+our @ISA = qw(DBD::MySQL::Server);
+
+
+sub new {
+  my $class = shift;
+  my %params = @_;
+  my $self = {
+    handle => $params{handle},
+    uptime => $params{uptime},
+    replication_user => $params{replication_user},
+    warningrange => $params{warningrange},
+    criticalrange => $params{criticalrange},
+    threads_connected => undef,
+    threads_created => undef,
+    connections => undef,
+    threadcache_hitrate => undef,
+    querycache_hitrate => undef,
+    lowmem_prunes_per_sec => undef,
+    slow_queries_per_sec => undef,
+    longrunners => undef,
+    tablecache_hitrate => undef,
+    index_usage => undef,
+    engine_innodb => undef,
+    engine_myisam => undef,
+    replication => undef,
+  };
+  bless $self, $class;
+  $self->init(%params);
+  return $self;
+}
+
+sub init {
+  my $self = shift;
+  my %params = @_;
+  my $dummy;
+  $self->init_nagios();
+  if ($params{mode} =~ /server::instance::connectedthreads/) {
+    ($dummy, $self->{threads_connected}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Threads_connected'
+    });
+  } elsif ($params{mode} =~ /server::instance::createdthreads/) {
+    ($dummy, $self->{threads_created}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Threads_created'
+    });
+    $self->valdiff(\%params, qw(threads_created));
+    $self->{threads_created_per_sec} = $self->{delta_threads_created} /
+        $self->{delta_timestamp};
+  } elsif ($params{mode} =~ /server::instance::runningthreads/) {
+    ($dummy, $self->{threads_running}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Threads_running'
+    });
+  } elsif ($params{mode} =~ /server::instance::cachedthreads/) {
+    ($dummy, $self->{threads_cached}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Threads_cached'
+    });
+  } elsif ($params{mode} =~ /server::instance::abortedconnects/) {
+    ($dummy, $self->{connects_aborted}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Aborted_connects'
+    });
+    $self->valdiff(\%params, qw(connects_aborted));
+    $self->{connects_aborted_per_sec} = $self->{delta_connects_aborted} /
+        $self->{delta_timestamp};
+  } elsif ($params{mode} =~ /server::instance::abortedclients/) {
+    ($dummy, $self->{clients_aborted}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Aborted_clients'
+    });
+    $self->valdiff(\%params, qw(clients_aborted));
+    $self->{clients_aborted_per_sec} = $self->{delta_clients_aborted} /
+        $self->{delta_timestamp};
+  } elsif ($params{mode} =~ /server::instance::threadcachehitrate/) {
+    ($dummy, $self->{threads_created}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Threads_created'
+    });
+    ($dummy, $self->{connections}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Connections'
+    });
+    $self->valdiff(\%params, qw(threads_created connections));
+    if ($self->{delta_connections} > 0) {
+      $self->{threadcache_hitrate_now} =
+          100 - ($self->{delta_threads_created} * 100.0 /
+          $self->{delta_connections});
+    } else {
+      $self->{threadcache_hitrate_now} = 100;
+    }
+    $self->{threadcache_hitrate} = 100 -
+        ($self->{threads_created} * 100.0 / $self->{connections});
+    $self->{connections_per_sec} = $self->{delta_connections} /
+        $self->{delta_timestamp};
+  } elsif ($params{mode} =~ /server::instance::querycachehitrate/) {
+    ($dummy, $self->{qcache_inserts}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Qcache_inserts'
+    });
+    ($dummy, $self->{qcache_not_cached}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Qcache_not_cached'
+    });
+    ($dummy, $self->{com_select}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Com_select'
+    });
+    ($dummy, $self->{qcache_hits}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Qcache_hits'
+    });
+    #    SHOW VARIABLES WHERE Variable_name = 'have_query_cache' for 5.x, but LIKE is compatible
+    ($dummy, $self->{have_query_cache}) = $self->{handle}->fetchrow_array(q{
+        SHOW VARIABLES LIKE 'have_query_cache'
+    });
+    #    SHOW VARIABLES WHERE Variable_name = 'query_cache_size'
+    ($dummy, $self->{query_cache_size}) = $self->{handle}->fetchrow_array(q{
+        SHOW VARIABLES LIKE 'query_cache_size'
+    });
+    $self->valdiff(\%params, qw(com_select qcache_hits));
+    $self->{querycache_hitrate_now} =
+        ($self->{delta_com_select} + $self->{delta_qcache_hits}) > 0 ?
+        100 * $self->{delta_qcache_hits} /
+            ($self->{delta_com_select} + $self->{delta_qcache_hits}) :
+        0;
+    $self->{querycache_hitrate} =
+        ($self->{qcache_not_cached} + $self->{qcache_inserts} + $self->{qcache_hits}) > 0 ?
+        100 * $self->{qcache_hits} /
+            ($self->{qcache_not_cached} + $self->{qcache_inserts} + $self->{qcache_hits}) :
+        0;
+    $self->{selects_per_sec} =
+        $self->{delta_com_select} / $self->{delta_timestamp};
+  } elsif ($params{mode} =~ /server::instance::querycachelowmemprunes/) {
+    ($dummy, $self->{lowmem_prunes}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Qcache_lowmem_prunes'
+    });
+    $self->valdiff(\%params, qw(lowmem_prunes));
+    $self->{lowmem_prunes_per_sec} = $self->{delta_lowmem_prunes} /
+        $self->{delta_timestamp};
+  } elsif ($params{mode} =~ /server::instance::slowqueries/) {
+    ($dummy, $self->{slow_queries}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Slow_queries'
+    });
+    $self->valdiff(\%params, qw(slow_queries));
+    $self->{slow_queries_per_sec} = $self->{delta_slow_queries} /
+        $self->{delta_timestamp};
+  } elsif ($params{mode} =~ /server::instance::longprocs/) {
+    if (DBD::MySQL::Server::return_first_server()->version_is_minimum("5.1")) {
+      ($self->{longrunners}) = $self->{handle}->fetchrow_array(qq(
+          SELECT
+              COUNT(*)
+          FROM
+              information_schema.processlist
+          WHERE user <> ?
+          AND id <> CONNECTION_ID()
+          AND time > 60
+          AND command <> 'Sleep'
+      ), $self->{replication_user});
+    } else {
+      $self->{longrunners} = 0 if ! defined $self->{longrunners};
+      foreach ($self->{handle}->fetchall_array(q{
+          SHOW PROCESSLIST
+      })) {
+        my($id, $user, $host, $db, $command, $tme, $state, $info) = @{$_};
+        if (($user ne $self->{replication_user}) &&
+            ($tme > 60) &&
+            ($command ne 'Sleep')) {
+          $self->{longrunners}++;
+        }
+      }
+    }
+  } elsif ($params{mode} =~ /server::instance::tablecachehitrate/) {
+    ($dummy, $self->{open_tables}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Open_tables'
+    });
+    ($dummy, $self->{opened_tables}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Opened_tables'
+    });
+    if (DBD::MySQL::Server::return_first_server()->version_is_minimum("5.1.3")) {
+      #      SHOW VARIABLES WHERE Variable_name = 'table_open_cache'
+      ($dummy, $self->{table_cache}) = $self->{handle}->fetchrow_array(q{
+          SHOW VARIABLES LIKE 'table_open_cache'
+      });
+    } else {
+      #    SHOW VARIABLES WHERE Variable_name = 'table_cache'
+      ($dummy, $self->{table_cache}) = $self->{handle}->fetchrow_array(q{
+          SHOW VARIABLES LIKE 'table_cache'
+      });
+    }
+    $self->{table_cache} ||= 0;
+    #$self->valdiff(\%params, qw(open_tables opened_tables table_cache));
+    # _now ist hier sinnlos, da opened_tables waechst, aber open_tables wieder
+    # schrumpfen kann weil tabellen geschlossen werden.
+    if ($self->{opened_tables} != 0 && $self->{table_cache} != 0) {
+      $self->{tablecache_hitrate} =
+          100 * $self->{open_tables} / $self->{opened_tables};
+      $self->{tablecache_fillrate} =
+          100 * $self->{open_tables} / $self->{table_cache};
+    } elsif ($self->{opened_tables} == 0 && $self->{table_cache} != 0) {
+      $self->{tablecache_hitrate} = 100;
+      $self->{tablecache_fillrate} =
+          100 * $self->{open_tables} / $self->{table_cache};
+    } else {
+      $self->{tablecache_hitrate} = 0;
+      $self->{tablecache_fillrate} = 0;
+      $self->add_nagios_critical("no table cache");
+    }
+  } elsif ($params{mode} =~ /server::instance::tablelockcontention/) {
+    ($dummy, $self->{table_locks_waited}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Table_locks_waited'
+    });
+    ($dummy, $self->{table_locks_immediate}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Table_locks_immediate'
+    });
+    $self->valdiff(\%params, qw(table_locks_waited table_locks_immediate));
+    $self->{table_lock_contention} =
+        ($self->{table_locks_waited} + $self->{table_locks_immediate}) > 0 ?
+        100 * $self->{table_locks_waited} /
+        ($self->{table_locks_waited} + $self->{table_locks_immediate}) :
+        100;
+    $self->{table_lock_contention_now} =
+        ($self->{delta_table_locks_waited} + $self->{delta_table_locks_immediate}) > 0 ?
+        100 * $self->{delta_table_locks_waited} /
+        ($self->{delta_table_locks_waited} + $self->{delta_table_locks_immediate}) :
+        100;
+  } elsif ($params{mode} =~ /server::instance::tableindexusage/) {
+    # http://johnjacobm.wordpress.com/2007/06/
+    # formula for calculating the percentage of full table scans
+    ($dummy, $self->{handler_read_first}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Handler_read_first'
+    });
+    ($dummy, $self->{handler_read_key}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Handler_read_key'
+    });
+    ($dummy, $self->{handler_read_next}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Handler_read_next'
+    });
+    ($dummy, $self->{handler_read_prev}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Handler_read_prev'
+    });
+    ($dummy, $self->{handler_read_rnd}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Handler_read_rnd'
+    });
+    ($dummy, $self->{handler_read_rnd_next}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Handler_read_rnd_next'
+    });
+    $self->valdiff(\%params, qw(handler_read_first handler_read_key
+        handler_read_next handler_read_prev handler_read_rnd
+        handler_read_rnd_next));
+    my $delta_reads = $self->{delta_handler_read_first} +
+        $self->{delta_handler_read_key} +
+        $self->{delta_handler_read_next} +
+        $self->{delta_handler_read_prev} +
+        $self->{delta_handler_read_rnd} +
+        $self->{delta_handler_read_rnd_next};
+    my $reads = $self->{handler_read_first} +
+        $self->{handler_read_key} +
+        $self->{handler_read_next} +
+        $self->{handler_read_prev} +
+        $self->{handler_read_rnd} +
+        $self->{handler_read_rnd_next};
+    $self->{index_usage_now} = ($delta_reads == 0) ? 0 :
+        100 - (100.0 * ($self->{delta_handler_read_rnd} +
+        $self->{delta_handler_read_rnd_next}) /
+        $delta_reads);
+    $self->{index_usage} = ($reads == 0) ? 0 :
+        100 - (100.0 * ($self->{handler_read_rnd} +
+        $self->{handler_read_rnd_next}) /
+        $reads);
+  } elsif ($params{mode} =~ /server::instance::tabletmpondisk/) {
+    ($dummy, $self->{created_tmp_tables}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Created_tmp_tables'
+    });
+    ($dummy, $self->{created_tmp_disk_tables}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Created_tmp_disk_tables'
+    });
+    $self->valdiff(\%params, qw(created_tmp_tables created_tmp_disk_tables));
+    $self->{pct_tmp_on_disk} = $self->{created_tmp_tables} > 0 ?
+        100 * $self->{created_tmp_disk_tables} / $self->{created_tmp_tables} :
+        100;
+    $self->{pct_tmp_on_disk_now} = $self->{delta_created_tmp_tables} > 0 ?
+        100 * $self->{delta_created_tmp_disk_tables} / $self->{delta_created_tmp_tables} :
+        100;
+  } elsif ($params{mode} =~ /server::instance::openfiles/) {
+    ($dummy, $self->{open_files_limit}) = $self->{handle}->fetchrow_array(q{
+        SHOW VARIABLES LIKE 'open_files_limit'
+    });
+    ($dummy, $self->{open_files}) = $self->{handle}->fetchrow_array(q{
+        SHOW /*!50000 global */ STATUS LIKE 'Open_files'
+    });
+    $self->{pct_open_files} = 100 * $self->{open_files} / $self->{open_files_limit};
+  } elsif ($params{mode} =~ /server::instance::needoptimize/) {
+    $self->{fragmented} = [];
+    #http://www.electrictoolbox.com/optimize-tables-mysql-php/
+    my  @result = $self->{handle}->fetchall_array(q{
+        SHOW TABLE STATUS
+    });
+    foreach (@result) {
+      my ($name, $engine, $data_length, $data_free) =
+          ($_->[0], $_->[1], $_->[6 ], $_->[9]);
+      next if ($params{name} && $params{name} ne $name);
+      my $fragmentation = $data_length ? $data_free * 100 / $data_length : 0;
+      push(@{$self->{fragmented}},
+          [$name, $fragmentation, $data_length, $data_free]);
+    }
+  } elsif ($params{mode} =~ /server::instance::myisam/) {
+    $self->{engine_myisam} = DBD::MySQL::Server::Instance::MyISAM->new(
+        %params
+    );
+  } elsif ($params{mode} =~ /server::instance::innodb/) {
+    $self->{engine_innodb} = DBD::MySQL::Server::Instance::Innodb->new(
+        %params
+    );
+  } elsif ($params{mode} =~ /server::instance::replication/) {
+    $self->{replication} = DBD::MySQL::Server::Instance::Replication->new(
+        %params
+    );
+  }
+}
+
+sub nagios {
+  my $self = shift;
+  my %params = @_;
+  if (! $self->{nagios_level}) {
+    if ($params{mode} =~ /server::instance::connectedthreads/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{threads_connected}, 10, 20),
+          sprintf "%d client connection threads", $self->{threads_connected});
+      $self->add_perfdata(sprintf "threads_connected=%d;%d;%d",
+          $self->{threads_connected},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::createdthreads/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{threads_created_per_sec}, 10, 20),
+          sprintf "%.2f threads created/sec", $self->{threads_created_per_sec});
+      $self->add_perfdata(sprintf "threads_created_per_sec=%.2f;%.2f;%.2f",
+          $self->{threads_created_per_sec},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::runningthreads/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{threads_running}, 10, 20),
+          sprintf "%d running threads", $self->{threads_running});
+      $self->add_perfdata(sprintf "threads_running=%d;%d;%d",
+          $self->{threads_running},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::cachedthreads/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{threads_cached}, 10, 20),
+          sprintf "%d cached threads", $self->{threads_cached});
+      $self->add_perfdata(sprintf "threads_cached=%d;%d;%d",
+          $self->{threads_cached},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::abortedconnects/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{connects_aborted_per_sec}, 1, 5),
+          sprintf "%.2f aborted connections/sec", $self->{connects_aborted_per_sec});
+      $self->add_perfdata(sprintf "connects_aborted_per_sec=%.2f;%.2f;%.2f",
+          $self->{connects_aborted_per_sec},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::abortedclients/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{clients_aborted_per_sec}, 1, 5),
+          sprintf "%.2f aborted (client died) connections/sec", $self->{clients_aborted_per_sec});
+      $self->add_perfdata(sprintf "clients_aborted_per_sec=%.2f;%.2f;%.2f",
+          $self->{clients_aborted_per_sec},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::threadcachehitrate/) {
+      my $refkey = 'threadcache_hitrate'.($params{lookback} ? '_now' : '');
+      $self->add_nagios(
+          $self->check_thresholds($self->{$refkey}, "90:", "80:"),
+          sprintf "thread cache hitrate %.2f%%", $self->{$refkey});
+      $self->add_perfdata(sprintf "thread_cache_hitrate=%.2f%%;%s;%s",
+          $self->{threadcache_hitrate},
+          $self->{warningrange}, $self->{criticalrange});
+      $self->add_perfdata(sprintf "thread_cache_hitrate_now=%.2f%%",
+          $self->{threadcache_hitrate_now});
+      $self->add_perfdata(sprintf "connections_per_sec=%.2f",
+          $self->{connections_per_sec});
+    } elsif ($params{mode} =~ /server::instance::querycachehitrate/) {
+      my $refkey = 'querycache_hitrate'.($params{lookback} ? '_now' : '');
+      if ((lc $self->{have_query_cache} eq 'yes') && ($self->{query_cache_size})) {
+        $self->add_nagios(
+            $self->check_thresholds($self->{$refkey}, "90:", "80:"),
+            sprintf "query cache hitrate %.2f%%", $self->{$refkey});
+      } else {
+        $self->check_thresholds($self->{$refkey}, "90:", "80:");
+        $self->add_nagios_ok(
+            sprintf "query cache hitrate %.2f%% (because it's turned off)",
+            $self->{querycache_hitrate});
+      }
+      $self->add_perfdata(sprintf "qcache_hitrate=%.2f%%;%s;%s",
+          $self->{querycache_hitrate},
+          $self->{warningrange}, $self->{criticalrange});
+      $self->add_perfdata(sprintf "qcache_hitrate_now=%.2f%%",
+          $self->{querycache_hitrate_now});
+      $self->add_perfdata(sprintf "selects_per_sec=%.2f",
+          $self->{selects_per_sec});
+    } elsif ($params{mode} =~ /server::instance::querycachelowmemprunes/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{lowmem_prunes_per_sec}, "1", "10"),
+          sprintf "%d query cache lowmem prunes in %d seconds (%.2f/sec)",
+          $self->{delta_lowmem_prunes}, $self->{delta_timestamp},
+          $self->{lowmem_prunes_per_sec});
+      $self->add_perfdata(sprintf "qcache_lowmem_prunes_rate=%.2f;%s;%s",
+          $self->{lowmem_prunes_per_sec},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::slowqueries/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{slow_queries_per_sec}, "0.1", "1"),
+          sprintf "%d slow queries in %d seconds (%.2f/sec)",
+          $self->{delta_slow_queries}, $self->{delta_timestamp},
+          $self->{slow_queries_per_sec});
+      $self->add_perfdata(sprintf "slow_queries_rate=%.2f%%;%s;%s",
+          $self->{slow_queries_per_sec},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::longprocs/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{longrunners}, 10, 20),
+          sprintf "%d long running processes", $self->{longrunners});
+      $self->add_perfdata(sprintf "long_running_procs=%d;%d;%d",
+          $self->{longrunners},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /server::instance::tablecachehitrate/) {
+      if ($self->{tablecache_fillrate} < 95) {
+        $self->add_nagios_ok(
+            sprintf "table cache hitrate %.2f%%, %.2f%% filled",
+                $self->{tablecache_hitrate},
+                $self->{tablecache_fillrate});
+        $self->check_thresholds($self->{tablecache_hitrate}, "99:", "95:");
+      } else {
+        $self->add_nagios(
+            $self->check_thresholds($self->{tablecache_hitrate}, "99:", "95:"),
+            sprintf "table cache hitrate %.2f%%", $self->{tablecache_hitrate});
+      }
+      $self->add_perfdata(sprintf "tablecache_hitrate=%.2f%%;%s;%s",
+          $self->{tablecache_hitrate},
+          $self->{warningrange}, $self->{criticalrange});
+      $self->add_perfdata(sprintf "tablecache_fillrate=%.2f%%",
+          $self->{tablecache_fillrate});
+    } elsif ($params{mode} =~ /server::instance::tablelockcontention/) {
+      my $refkey = 'table_lock_contention'.($params{lookback} ? '_now' : '');
+      if ($self->{uptime} > 10800) { # MySQL Bug #30599
+        $self->add_nagios(
+            $self->check_thresholds($self->{$refkey}, "1", "2"),
+                sprintf "table lock contention %.2f%%", $self->{$refkey});
+      } else {
+        $self->check_thresholds($self->{$refkey}, "1", "2");
+        $self->add_nagios_ok(
+            sprintf "table lock contention %.2f%% (uptime < 10800)",
+            $self->{$refkey});
+      }
+      $self->add_perfdata(sprintf "tablelock_contention=%.2f%%;%s;%s",
+          $self->{table_lock_contention},
+          $self->{warningrange}, $self->{criticalrange});
+      $self->add_perfdata(sprintf "tablelock_contention_now=%.2f%%",
+          $self->{table_lock_contention_now});
+    } elsif ($params{mode} =~ /server::instance::tableindexusage/) {
+      my $refkey = 'index_usage'.($params{lookback} ? '_now' : '');
+      $self->add_nagios(
+          $self->check_thresholds($self->{$refkey}, "90:", "80:"),
+              sprintf "index usage  %.2f%%", $self->{$refkey});
+      $self->add_perfdata(sprintf "index_usage=%.2f%%;%s;%s",
+          $self->{index_usage},
+          $self->{warningrange}, $self->{criticalrange});
+      $self->add_perfdata(sprintf "index_usage_now=%.2f%%",
+          $self->{index_usage_now});
+    } elsif ($params{mode} =~ /server::instance::tabletmpondisk/) {
+      my $refkey = 'pct_tmp_on_disk'.($params{lookback} ? '_now' : '');
+      $self->add_nagios(
+          $self->check_thresholds($self->{$refkey}, "25", "50"),
+              sprintf "%.2f%% of %d tables were created on disk",
+              $self->{$refkey}, $self->{delta_created_tmp_tables});
+      $self->add_perfdata(sprintf "pct_tmp_table_on_disk=%.2f%%;%s;%s",
+          $self->{pct_tmp_on_disk},
+          $self->{warningrange}, $self->{criticalrange});
+      $self->add_perfdata(sprintf "pct_tmp_table_on_disk_now=%.2f%%",
+          $self->{pct_tmp_on_disk_now});
+    } elsif ($params{mode} =~ /server::instance::openfiles/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{pct_open_files}, 80, 95),
+          sprintf "%.2f%% of the open files limit reached (%d of max. %d)",
+              $self->{pct_open_files},
+              $self->{open_files}, $self->{open_files_limit});
+      $self->add_perfdata(sprintf "pct_open_files=%.3f%%;%.3f;%.3f",
+          $self->{pct_open_files},
+          $self->{warningrange},
+          $self->{criticalrange});
+      $self->add_perfdata(sprintf "open_files=%d;%d;%d",
+          $self->{open_files},
+          $self->{open_files_limit} * $self->{warningrange} / 100,
+          $self->{open_files_limit} * $self->{criticalrange} / 100);
+    } elsif ($params{mode} =~ /server::instance::needoptimize/) {
+      foreach (@{$self->{fragmented}}) {
+        $self->add_nagios(
+            $self->check_thresholds($_->[1], 10, 25),
+            sprintf "table %s is %.2f%% fragmented", $_->[0], $_->[1]);
+        if ($params{name}) {
+          $self->add_perfdata(sprintf "'%s_frag'=%.2f%%;%d;%d",
+              $_->[0], $_->[1], $self->{warningrange}, $self->{criticalrange});
+        }
+      }
+    } elsif ($params{mode} =~ /server::instance::myisam/) {
+      $self->{engine_myisam}->nagios(%params);
+      $self->merge_nagios($self->{engine_myisam});
+    } elsif ($params{mode} =~ /server::instance::innodb/) {
+      $self->{engine_innodb}->nagios(%params);
+      $self->merge_nagios($self->{engine_innodb});
+    } elsif ($params{mode} =~ /server::instance::replication/) {
+      $self->{replication}->nagios(%params);
+      $self->merge_nagios($self->{replication});
+    }
+  }
+}
+
+
+
+package DBD::MySQL::Server;
+
+use strict;
+use Time::HiRes;
+use IO::File;
+use File::Copy 'cp';
+use Data::Dumper;
+
+
+{
+  our $verbose = 0;
+  our $scream = 0; # scream if something is not implemented
+  our $access = "dbi"; # how do we access the database.
+  our $my_modules_dyn_dir = ""; # where we look for self-written extensions
+
+  my @servers = ();
+  my $initerrors = undef;
+
+  sub add_server {
+    push(@servers, shift);
+  }
+
+  sub return_servers {
+    return @servers;
+  }
+
+  sub return_first_server() {
+    return $servers[0];
+  }
+
+}
+
+sub new {
+  my $class = shift;
+  my %params = @_;
+  my $self = {
+    mode => $params{mode},
+    access => $params{method} || 'dbi',
+    hostname => $params{hostname},
+    database => $params{database} || 'information_schema',
+    port => $params{port},
+    socket => $params{socket},
+    username => $params{username},
+    password => $params{password},
+    replication_user => $params{replication_user},
+    mycnf => $params{mycnf},
+    mycnfgroup => $params{mycnfgroup},
+    timeout => $params{timeout},
+    warningrange => $params{warningrange},
+    criticalrange => $params{criticalrange},
+    verbose => $params{verbose},
+    report => $params{report},
+    negate => $params{negate},
+    labelformat => $params{labelformat},
+    version => 'unknown',
+    instance => undef,
+    handle => undef,
+  };
+  bless $self, $class;
+  $self->init_nagios();
+  if ($self->dbconnect(%params)) {
+    ($self->{dummy}, $self->{version}) = $self->{handle}->fetchrow_array(
+        #q{ SHOW VARIABLES WHERE Variable_name = 'version' }
+        q{ SHOW VARIABLES LIKE 'version' }
+    );
+    $self->{version} = (split "-", $self->{version})[0];
+    ($self->{dummy}, $self->{uptime}) = $self->{handle}->fetchrow_array(
+        q{ SHOW STATUS LIKE 'Uptime' }
+    );
+    DBD::MySQL::Server::add_server($self);
+    $self->init(%params);
+  }
+  return $self;
+}
+
+sub init {
+  my $self = shift;
+  my %params = @_;
+  $params{handle} = $self->{handle};
+  $params{uptime} = $self->{uptime};
+  $self->set_global_db_thresholds(\%params);
+  if ($params{mode} =~ /^server::instance/) {
+    $self->{instance} = DBD::MySQL::Server::Instance->new(%params);
+  } elsif ($params{mode} =~ /^server::sql/) {
+    $self->set_local_db_thresholds(%params);
+    if ($params{regexp}) {
+      # sql output is treated as text
+      if ($params{name2} eq $params{name}) {
+        $self->add_nagios_unknown(sprintf "where's the regexp????");
+      } else {
+        $self->{genericsql} =
+            $self->{handle}->fetchrow_array($params{selectname});
+        if (! defined $self->{genericsql}) {
+          $self->add_nagios_unknown(sprintf "got no valid response for %s",
+              $params{selectname});
+        }
+      }
+    } else {
+      # sql output must be a number (or array of numbers)
+      @{$self->{genericsql}} =
+          $self->{handle}->fetchrow_array($params{selectname});
+      if ($self->{handle}->{errstr}) {
+        $self->add_nagios_unknown(sprintf "got no valid response for %s: %s",
+            $params{selectname}, $self->{handle}->{errstr});
+      } elsif (! (defined $self->{genericsql} &&
+          (scalar(grep {
+              /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/
+          } @{$self->{genericsql}})) ==
+          scalar(@{$self->{genericsql}}))) {
+        $self->add_nagios_unknown(sprintf "got no valid response for %s",
+            $params{selectname});
+      } elsif (! defined $self->{genericsql}) {
+        $self->add_nagios_unknown(sprintf "got no valid response for %s",
+            $params{selectname});
+      } else {
+        # name2 in array
+        # units in array
+      }
+    }
+  } elsif ($params{mode} =~ /^server::uptime/) {
+    # already set with the connection. but use minutes here
+  } elsif ($params{mode} =~ /^server::connectiontime/) {
+    $self->{connection_time} = $self->{tac} - $self->{tic};
+  } elsif ($params{mode} =~ /^my::([^:.]+)/) {
+    my $class = $1;
+    my $loaderror = undef;
+    substr($class, 0, 1) = uc substr($class, 0, 1);
+    foreach my $libpath (split(":", $DBD::MySQL::Server::my_modules_dyn_dir)) {
+      foreach my $extmod (glob $libpath."/CheckMySQLHealth*.pm") {
+        eval {
+          $self->trace(sprintf "loading module %s", $extmod);
+          require $extmod;
+        };
+        if ($@) {
+          $loaderror = $extmod;
+          $self->trace(sprintf "failed loading module %s: %s", $extmod, $@);
+        }
+      }
+    }
+    my $obj = {
+        handle => $params{handle},
+        warningrange => $params{warningrange},
+        criticalrange => $params{criticalrange},
+    };
+    bless $obj, "My$class";
+    $self->{my} = $obj;
+    if ($self->{my}->isa("DBD::MySQL::Server")) {
+      my $dos_init = $self->can("init");
+      my $dos_nagios = $self->can("nagios");
+      my $my_init = $self->{my}->can("init");
+      my $my_nagios = $self->{my}->can("nagios");
+      if ($my_init == $dos_init) {
+          $self->add_nagios_unknown(
+              sprintf "Class %s needs an init() method", ref($self->{my}));
+      } elsif ($my_nagios == $dos_nagios) {
+          $self->add_nagios_unknown(
+              sprintf "Class %s needs a nagios() method", ref($self->{my}));
+      } else {
+        $self->{my}->init_nagios(%params);
+        $self->{my}->init(%params);
+      }
+    } else {
+      $self->add_nagios_unknown(
+          sprintf "Class %s is not a subclass of DBD::MySQL::Server%s",
+              ref($self->{my}),
+              $loaderror ? sprintf " (syntax error in %s?)", $loaderror : "" );
+    }
+  } else {
+    printf "broken mode %s\n", $params{mode};
+  }
+}
+
+sub dump {
+  my $self = shift;
+  my $message = shift || "";
+  printf "%s %s\n", $message, Data::Dumper::Dumper($self);
+}
+
+sub nagios {
+  my $self = shift;
+  my %params = @_;
+  if (! $self->{nagios_level}) {
+    if ($params{mode} =~ /^server::instance/) {
+      $self->{instance}->nagios(%params);
+      $self->merge_nagios($self->{instance});
+    } elsif ($params{mode} =~ /^server::database/) {
+      $self->{database}->nagios(%params);
+      $self->merge_nagios($self->{database});
+    } elsif ($params{mode} =~ /^server::uptime/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{uptime} / 60, "10:", "5:"),
+          sprintf "database is up since %d minutes", $self->{uptime} / 60);
+      $self->add_perfdata(sprintf "uptime=%ds",
+          $self->{uptime});
+    } elsif ($params{mode} =~ /^server::connectiontime/) {
+      $self->add_nagios(
+          $self->check_thresholds($self->{connection_time}, 1, 5),
+          sprintf "%.2f seconds to connect as %s",
+              $self->{connection_time}, ($self->{username} || getpwuid($<)));
+      $self->add_perfdata(sprintf "connection_time=%.4fs;%d;%d",
+          $self->{connection_time},
+          $self->{warningrange}, $self->{criticalrange});
+    } elsif ($params{mode} =~ /^server::sql/) {
+      if ($params{regexp}) {
+        if (substr($params{name2}, 0, 1) eq '!') {
+          $params{name2} =~ s/^!//;
+          if ($self->{genericsql} !~ /$params{name2}/) {
+            $self->add_nagios_ok(
+                sprintf "output %s does not match pattern %s",
+                    $self->{genericsql}, $params{name2});
+          } else {
+            $self->add_nagios_critical(
+                sprintf "output %s matches pattern %s",
+                    $self->{genericsql}, $params{name2});
+          }
+        } else {
+          if ($self->{genericsql} =~ /$params{name2}/) {
+            $self->add_nagios_ok(
+                sprintf "output %s matches pattern %s",
+                    $self->{genericsql}, $params{name2});
+          } else {
+            $self->add_nagios_critical(
+                sprintf "output %s does not match pattern %s",
+                    $self->{genericsql}, $params{name2});
+          }
+        }
+      } else {
+        $self->add_nagios(
+            # the first item in the list will trigger the threshold values
+            $self->check_thresholds($self->{genericsql}[0], 1, 5),
+                sprintf "%s: %s%s",
+                $params{name2} ? lc $params{name2} : lc $params{selectname},
+                # float as float, integers as integers
+                join(" ", map {
+                    (sprintf("%d", $_) eq $_) ? $_ : sprintf("%f", $_)
+                } @{$self->{genericsql}}),
+                $params{units} ? $params{units} : "");
+        my $i = 0;
+        # workaround... getting the column names from the database would be nicer
+        my @names2_arr = split(/\s+/, $params{name2});
+        foreach my $t (@{$self->{genericsql}}) {
+          $self->add_perfdata(sprintf "\'%s\'=%s%s;%s;%s",
+              $names2_arr[$i] ? lc $names2_arr[$i] : lc $params{selectname},
+              # float as float, integers as integers
+              (sprintf("%d", $t) eq $t) ? $t : sprintf("%f", $t),
+              $params{units} ? $params{units} : "",
+            ($i == 0) ? $self->{warningrange} : "",
+              ($i == 0) ? $self->{criticalrange} : ""
+          );
+          $i++;
+        }
+      }
+    } elsif ($params{mode} =~ /^my::([^:.]+)/) {
+      $self->{my}->nagios(%params);
+      $self->merge_nagios($self->{my});
+    }
+  }
+}
+
+
+sub init_nagios {
+  my $self = shift;
+  no strict 'refs';
+  if (! ref($self)) {
+    my $nagiosvar = $self."::nagios";
+    my $nagioslevelvar = $self."::nagios_level";
+    $$nagiosvar = {
+      messages => {
+        0 => [],
+        1 => [],
+        2 => [],
+        3 => [],
+      },
+      perfdata => [],
+    };
+    $$nagioslevelvar = $ERRORS{OK},
+  } else {
+    $self->{nagios} = {
+      messages => {
+        0 => [],
+        1 => [],
+        2 => [],
+        3 => [],
+      },
+      perfdata => [],
+    };
+    $self->{nagios_level} = $ERRORS{OK},
+  }
+}
+
+sub check_thresholds {
+  my $self = shift;
+  my $value = shift;
+  my $defaultwarningrange = shift;
+  my $defaultcriticalrange = shift;
+  my $level = $ERRORS{OK};
+  $self->{warningrange} = defined $self->{warningrange} ?
+      $self->{warningrange} : $defaultwarningrange;
+  $self->{criticalrange} = defined $self->{criticalrange} ?
+      $self->{criticalrange} : $defaultcriticalrange;
+
+  if ($self->{warningrange} =~ /^([-+]?[0-9]*\.?[0-9]+)$/) {
+    # warning = 10, warn if > 10 or < 0
+    $level = $ERRORS{WARNING}
+        if ($value > $1 || $value < 0);
+  } elsif ($self->{warningrange} =~ /^([-+]?[0-9]*\.?[0-9]+):$/) {
+    # warning = 10:, warn if < 10
+    $level = $ERRORS{WARNING}
+        if ($value < $1);
+  } elsif ($self->{warningrange} =~ /^~:([-+]?[0-9]*\.?[0-9]+)$/) {
+    # warning = ~:10, warn if > 10
+    $level = $ERRORS{WARNING}
+        if ($value > $1);
+  } elsif ($self->{warningrange} =~ /^([-+]?[0-9]*\.?[0-9]+):([-+]?[0-9]*\.?[0-9]+)$/) {
+# warning = 10:20, warn if < 10 or > 20
+    $level = $ERRORS{WARNING}
+        if ($value < $1 || $value > $2);
+  } elsif ($self->{warningrange} =~ /^@([-+]?[0-9]*\.?[0-9]+):([-+]?[0-9]*\.?[0-9]+)$/) {
+    # warning = @10:20, warn if >= 10 and <= 20
+    $level = $ERRORS{WARNING}
+        if ($value >= $1 && $value <= $2);
+  }
+  if ($self->{criticalrange} =~ /^([-+]?[0-9]*\.?[0-9]+)$/) {
+    # critical = 10, crit if > 10 or < 0
+    $level = $ERRORS{CRITICAL}
+        if ($value > $1 || $value < 0);
+  } elsif ($self->{criticalrange} =~ /^([-+]?[0-9]*\.?[0-9]+):$/) {
+    # critical = 10:, crit if < 10
+    $level = $ERRORS{CRITICAL}
+        if ($value < $1);
+  } elsif ($self->{criticalrange} =~ /^~:([-+]?[0-9]*\.?[0-9]+)$/) {
+    # critical = ~:10, crit if > 10
+    units => $commandline{units},
+    lookback => $commandline{lookback} || 0,
+    eyecandy => $commandline{eyecandy},
+    statefilesdir => $commandline{statefilesdir},
+    verbose => $commandline{verbose},
+    report => $commandline{report},
+    labelformat => $commandline{labelformat},
+    negate => $commandline{negate},
+);
+
+my $server = undef;
+my $cluster = undef;
+
+if ($params{mode} =~ /^(server|my)/) {
+  $server = DBD::MySQL::Server->new(%params);
+  $server->nagios(%params);
+  $server->calculate_result(\%labels);
+  $nagios_message = $server->{nagios_message};
+  $nagios_level = $server->{nagios_level};
+  $perfdata = $server->{perfdata};
+} elsif ($params{mode} =~ /^cluster/) {
+  $cluster = DBD::MySQL::Cluster->new(%params);
+  $cluster->nagios(%params);
+  $cluster->calculate_result(\%labels);
+  $nagios_message = $cluster->{nagios_message};
+  $nagios_level = $cluster->{nagios_level};
+  $perfdata = $cluster->{perfdata};
+}
+
+printf "%s - %s", $ERRORCODES{$nagios_level}, $nagios_message;
+printf " | %s", $perfdata if $perfdata;
+printf "\n";
+exit $nagios_level;
+
+
+__END__
+
+

@@ -1,0 +1,15 @@
+#!/bin/bash
+#Check for cluster status
+total_clusters=`sudo su - node -c 'pm2 ls | grep "clicklab-analytics" | wc -l'`
+online_clusters=`sudo su - node -c 'pm2 ls | grep "clicklab-analytics" | grep online | wc -l'`
+errored_clusters=`sudo su - node -c 'pm2 ls | grep "clicklab-analytics" | grep errored | wc -l'`
+stopped_clusters=`sudo su - node -c 'pm2 ls | grep "clicklab-analytics" | grep stopped | wc -l'`
+if [[ $online_clusters -lt $total_clusters ]]
+then
+    echo "CRITICAL : chariot-prod cluster down!! "$errored_clusters" ARE IN ERRORED STATE, "$stopped_clusters" ARE IN STOPPED STATE"
+    curl -k https://prod-analytics.jugnoo.in:8888/criticalStateTrigger/chariot/analytics
+    exit 2
+else
+    echo "OK : 0 ARE IN ERRORED STATE, 0 ARE IN STOPPED STATE"
+    exit 0
+fi
